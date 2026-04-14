@@ -1,6 +1,6 @@
 # Create Video
 
-Generates a narrated MP4 video from a PowerPoint (.pptx) file. Each slide becomes a video segment with text-to-speech narration derived from speaker notes.
+Generates a narrated MP4 video from a PowerPoint (.pptx) file. Each slide becomes a video segment with text-to-speech narration derived from speaker notes. Can also export audio only.
 
 ## How It Works
 
@@ -12,12 +12,18 @@ Generates a narrated MP4 video from a PowerPoint (.pptx) file. Each slide become
 ## Prerequisites
 
 - Python 3.9+
-- [FFmpeg](https://ffmpeg.org/download.html) installed and on your PATH
+- [FFmpeg](https://ffmpeg.org/download.html) installed and on your PATH (or install `imageio-ffmpeg` as a fallback)
 
 ## Installation
 
 ```bash
 pip install python-pptx Pillow edge-tts moviepy
+```
+
+Optionally, if FFmpeg is not on your PATH:
+
+```bash
+pip install imageio-ffmpeg
 ```
 
 ## Configuration
@@ -33,6 +39,16 @@ When you launch the script, a GUI window appears where you can configure:
 
 Each field is pre-filled with a default value. Use the **Browse** / **Save As** buttons or type a path directly.
 
+## Output Modes
+
+The GUI provides three output modes:
+
+| Mode                          | Description                                                        |
+|-------------------------------|--------------------------------------------------------------------|
+| **Create Video**              | Full MP4 video with images and narration (default)                 |
+| **Export Audio (separate)**   | One MP3 file per slide, saved to the build directory               |
+| **Export Audio (single track)** | All slide narrations combined into a single `combined-audio.mp3` |
+
 ## Usage
 
 ```bash
@@ -45,14 +61,15 @@ Or use the included batch file:
 run.bat
 ```
 
-The GUI provides a **Create Video** button, a progress bar, and a real-time log panel showing each step.
+The GUI provides a **Run** button, a progress bar, and a real-time log panel showing each step.
 
 ## Speaker Notes Format
 
-- Lines matching a local image path (e.g. `C:\Screenshots\step1.png`) are used as the slide image.
+- Lines matching a local image path (e.g. `C:\Screenshots\step1.png`) are used as the slide image instead of the embedded one.
 - All other lines become the narration text for that slide.
-- Slides with no narration display for 3 seconds.
+- Slides with no narration display for 3 seconds of silence.
 
 ## Output
 
-The script produces an MP4 video at 1920×1080, 24 fps, with H.264 video and AAC audio.
+- **Video mode** — MP4 at 1920×1080, 24 fps, H.264 video and AAC audio.
+- **Audio modes** — MP3 files in the build directory.

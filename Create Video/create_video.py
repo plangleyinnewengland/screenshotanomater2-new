@@ -18,6 +18,15 @@ from PIL import Image
 from pptx import Presentation
 from pptx.util import Inches
 
+# Configure pydub to use imageio_ffmpeg if system ffmpeg is missing
+_ffmpeg_path = None
+if not shutil.which("ffmpeg"):
+    try:
+        from imageio_ffmpeg import get_ffmpeg_exe
+        _ffmpeg_path = get_ffmpeg_exe()
+    except ImportError:
+        pass
+
 # Default configuration values
 DEFAULTS = {
     "pptx_path": r"C:\GitHub\PDC\Monitor Your Services\Monitor Services.pptx",
@@ -180,6 +189,83 @@ def assemble_video(image_paths, audio_paths, durations, output_dir, output_video
     print(f"Duration: {final.duration:.1f}s ({final.duration/60:.1f} min)")
 
 
+async def export_audio_only(pptx_path, output_dir, voice, separate_tracks, log_fn):
+    """Export audio only from speaker notes, either as separate MP3 files or one combined MP3."""
+    import edge_tts
+    import subprocess
+
+    ffmpeg_bin = _ffmpeg_path or "ffmpeg"
+
+    log_fn("=" * 50)
+    log_fn("AUDIO EXPORT")
+    log_fn("=" * 50)
+
+    log_fn("\n[1/2] Extracting slides from PowerPoint...")
+    slides = extract_slides(pptx_path)
+    log_fn(f"  Found {len(slides)} slides")
+
+    log_fn("\n[2/2] Generating TTS audio...")
+
+    generated = []
+    for s in slides:
+        if not s['narration']:
+            log_fn(f"  Slide {s['slide_num']}: No narration, skipping")
+            generated.append(None)
+            continue
+
+        mp3_path = os.path.join(output_dir, f"slide-{s['slide_num']:03d}-audio.mp3")
+        communicate = edge_tts.Communicate(s['narration'], voice)
+        await communicate.save(mp3_path)
+
+        generated.append(mp3_path)
+        log_fn(f"  Slide {s['slide_num']}: Generated {mp3_path}")
+
+    if separate_tracks:
+        count = sum(1 for g in generated if g is not None)
+        log_fn(f"\nExported {count} separate audio files to: {output_dir}")
+    else:
+        # Combine all tracks into one file using ffmpeg concat
+        valid_files = [f for f in generated if f and os.path.exists(f)]
+        if not valid_files:
+            log_fn("\nNo audio files to combine.")
+            return
+
+        # Create a 1-second silence file for gaps between slides
+        silence_path = os.path.join(output_dir, "_silence.mp3")
+        subprocess.run([
+            ffmpeg_bin, "-y", "-f", "lavfi", "-i",
+            "anullsrc=r=24000:cl=mono", "-t", "1",
+            "-c:a", "libmp3lame", "-q:a", "9", silence_path
+        ], capture_output=True)
+
+        # Build concat list file
+        list_path = os.path.join(output_dir, "_concat_list.txt")
+        with open(list_path, "w") as f:
+            for i, mp3_path in enumerate(valid_files):
+                f.write(f"file '{mp3_path}'\n")
+                if i < len(valid_files) - 1:
+                    f.write(f"file '{silence_path}'\n")
+
+        combined_path = os.path.join(output_dir, "combined-audio.mp3")
+        result = subprocess.run([
+            ffmpeg_bin, "-y", "-f", "concat", "-safe", "0",
+            "-i", list_path, "-c", "copy", combined_path
+        ], capture_output=True, text=True)
+
+        # Clean up temp files
+        for mp3_path in valid_files:
+            os.remove(mp3_path)
+        os.remove(silence_path)
+        os.remove(list_path)
+
+        if result.returncode != 0:
+            raise RuntimeError(f"ffmpeg failed: {result.stderr}")
+
+        log_fn(f"\nExported combined audio: {combined_path}")
+
+    log_fn("\nDone!")
+
+
 async def run_pipeline(pptx_path, output_dir, output_video, voice, log_fn):
     """Run the full video creation pipeline, reporting progress via log_fn."""
     log_fn("=" * 50)
@@ -237,17 +323,25 @@ class VideoCreatorApp:
         self.voice_var = tk.StringVar(value=DEFAULTS["voice"])
         ttk.Entry(config_frame, textvariable=self.voice_var, width=70).grid(row=3, column=1, padx=5, pady=2)
 
+        # --- Output mode ---
+        mode_frame = ttk.LabelFrame(root, text="Output Mode", padding=10)
+        mode_frame.grid(row=1, column=0, padx=10, pady=(5, 5), sticky="ew")
+        self.mode_var = tk.StringVar(value="video")
+        ttk.Radiobutton(mode_frame, text="Create Video", variable=self.mode_var, value="video").pack(side="left", padx=(0, 15))
+        ttk.Radiobutton(mode_frame, text="Export Audio (separate tracks)", variable=self.mode_var, value="audio_separate").pack(side="left", padx=(0, 15))
+        ttk.Radiobutton(mode_frame, text="Export Audio (single track)", variable=self.mode_var, value="audio_combined").pack(side="left")
+
         # --- Buttons ---
         btn_frame = ttk.Frame(root, padding=(10, 5))
-        btn_frame.grid(row=1, column=0, sticky="ew")
-        self.create_btn = ttk.Button(btn_frame, text="Create Video", command=self._on_create)
+        btn_frame.grid(row=2, column=0, sticky="ew")
+        self.create_btn = ttk.Button(btn_frame, text="Run", command=self._on_create)
         self.create_btn.pack(side="left")
         self.progress = ttk.Progressbar(btn_frame, mode="indeterminate", length=200)
         self.progress.pack(side="left", padx=10)
 
         # --- Log output ---
         log_frame = ttk.LabelFrame(root, text="Progress", padding=5)
-        log_frame.grid(row=2, column=0, padx=10, pady=(5, 10), sticky="nsew")
+        log_frame.grid(row=3, column=0, padx=10, pady=(5, 10), sticky="nsew")
         self.log_text = tk.Text(log_frame, height=18, width=90, state="disabled",
                                 bg="#1e1e1e", fg="#d4d4d4", font=("Consolas", 9))
         scrollbar = ttk.Scrollbar(log_frame, orient="vertical", command=self.log_text.yview)
@@ -318,10 +412,17 @@ class VideoCreatorApp:
             self._log(message)
         builtins.print = log_print
 
+        mode = self.mode_var.get()
+
         def worker():
             try:
-                asyncio.run(run_pipeline(pptx_path, output_dir, output_video, voice, self._log))
-                self.root.after(0, lambda: messagebox.showinfo("Complete", f"Video saved to:\n{output_video}"))
+                if mode == "video":
+                    asyncio.run(run_pipeline(pptx_path, output_dir, output_video, voice, self._log))
+                    self.root.after(0, lambda: messagebox.showinfo("Complete", f"Video saved to:\n{output_video}"))
+                else:
+                    separate = (mode == "audio_separate")
+                    asyncio.run(export_audio_only(pptx_path, output_dir, voice, separate, self._log))
+                    self.root.after(0, lambda: messagebox.showinfo("Complete", f"Audio exported to:\n{output_dir}"))
             except Exception as e:
                 self._log(f"\nERROR: {e}")
                 self.root.after(0, lambda: messagebox.showerror("Error", str(e)))
